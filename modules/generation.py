@@ -3,8 +3,10 @@ import faiss
 from embedding import EmbeddingHandler
 
 class AnswerGenerator:
-    def __init__(self, model_handler):
+    def __init__(self, model_handler, chunk_size=512, answer_aggregation="concat"):
         self.model_handler = model_handler
+        self.chunk_size = chunk_size
+        self.answer_aggregation = answer_aggregation
         self.qa_pipeline = pipeline(
             "text-generation",
             model=model_handler.model,
@@ -19,39 +21,50 @@ class AnswerGenerator:
         )
 
     def generate_answer_and_collect_results(self, question, data, top_k=10):
-        # Embed the query question
-        query_vector = EmbeddingHandler().get_embedding(question).reshape(1, -1)
+        # 질문을 임베딩하여 벡터화한 뒤, L2 정규화를 수행한다
+        query_vector = self.model_handler.get_embedding(question).reshape(1, -1)
         faiss.normalize_L2(query_vector)
         
-        # Load FAISS index and retrieve top-k contexts
+        # 저장된 FAISS 인덱스를 불러오고, top-k개의 유사한 문서를 검색한다
         index = faiss.read_index("faiss_index.bin")
         distances, indices = index.search(query_vector, k=top_k)
         
-        # Collect contexts as a list
-        contexts = [data[int(i)]["documents"] for i in indices[0]]
-        
-        flattened_contexts = [
-            item if isinstance(item, str) else " ".join(item) 
-            for sublist in contexts for item in (sublist if isinstance(sublist, list) else [sublist])
+        # 검색된 문서의 내용을 모아서 context로 사용한다
+        contexts = [
+            data[int(i)]["documents"] if isinstance(data[int(i)]["documents"], str)
+            else " ".join(data[int(i)]["documents"])
+            for i in indices[0]
         ]
+
+        # 모든 context를 하나의 텍스트로 합치고, chunk 크기에 따라 토큰을 나눈다
+        context_text = " ".join(contexts)
+        tokenized_text = self.model_handler.tokenizer(context_text, truncation=False, return_tensors="pt")
+        token_chunks = tokenized_text["input_ids"][0].split(self.chunk_size)
         
-        # Join contexts for prompt
-        _contexts = " ".join(flattened_contexts)
-        # Prepare prompt for the model
-        prompt = f"Q: {question}\nContext: {_contexts}\nA:"
-        inputs = self.model_handler.tokenizer(prompt, truncation=True, max_length=1024, return_tensors="pt")
-        inputs = {k: v.to(self.model_handler.device) for k, v in inputs.items()}
-        
-        # Generate answer
-        generated_text = self.model_handler.model.generate(**inputs, max_new_tokens=50)
-        answer = self.model_handler.tokenizer.decode(generated_text[0], skip_special_tokens=True).split("A:")[-1].strip()
-        
-        # Return results with `retrieved_contexts` as a list
+        # 각 chunk에 대해 부분 답변을 생성한다
+        partial_answers = []
+        for chunk in token_chunks:
+            prompt = f"Q: {question}\nContext: {self.model_handler.tokenizer.decode(chunk)}\nA:"
+            inputs = self.model_handler.tokenizer(prompt, return_tensors="pt").to(self.model_handler.device)
+            generated_tokens = self.model_handler.model.generate(inputs["input_ids"], max_new_tokens=50)
+            partial_answer = self.model_handler.tokenizer.decode(generated_tokens[0], skip_special_tokens=True).split("A:")[-1].strip()
+            partial_answers.append(partial_answer)
+
+        # 지정된 결합 방식을 사용하여 부분 답변을 하나의 답변으로 결합한다
+        if self.answer_aggregation == "concat":
+            answer = " ".join(partial_answers)
+        elif self.answer_aggregation == "majority_vote":
+            answer = max(set(partial_answers), key=partial_answers.count)  # 가장 자주 등장한 답변을 선택
+        elif self.answer_aggregation == "best_match":
+            answer = sorted(partial_answers, key=lambda x: self.model_handler.get_embedding(x) @ query_vector.T)[0]  # 임베딩 유사도에 따라 가장 적합한 답변 선택
+        else:
+            answer = " ".join(partial_answers)  # 부분 답변을 단순히 연결
+
+        # return
         return {
-            "question": question,
-            "answer": answer,
-            "contexts": flattened_contexts,  # Pass as a list for RAGAS
-            
-            # 직접 eval code를 train set으로 돌려보고 싶다면, train set을 이용해보세요. ground truth를 넣어서 보내야 함! 
-            #"ground_truth": data[0]["response"]  # Adjust based on desired ground truth
+            "question": question,     # 원본 질문
+            "answer": answer,         # 생성된 최종 답변
+            "contexts": contexts,     # 검색된 문서의 context들 리스트
+
+            # "ground_truth": data[0].get("response", None)
         }

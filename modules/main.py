@@ -17,16 +17,15 @@ _question = load_from_disk("/root/YBIGTA_X_KUBIG_Hackathon/combined_dataset")['t
 
 
 # # 임베딩 생성 및 삽입
-# logging.info("Inserting data into FAISS index...")
-# embedding_handler = EmbeddingHandler()
-# embedding_handler.insert_data_into_faiss(data)
+logging.info("Inserting data into FAISS index...")
+embedding_handler = EmbeddingHandler()
+embedding_handler.insert_data_into_faiss(data)
 
 # 모델 초기화 및 답변 생성
 model_handler = ModelHandler()
 answer_generator = AnswerGenerator(model_handler)
 results = []
 
-# 질문 개수는 200개 이기 떄문에 range(200)을 걸어두었습니다~!
 for i in tqdm(range(200)):
     question = _question[i]["question"]
     logging.info(f"Generating answer for question {i + 1}: {question}")

@@ -5,9 +5,6 @@ from ragas.metrics import answer_relevancy, context_precision, faithfulness, con
 import os
 from datasets import Dataset
 
-
-#open ai api key를 export해보면 사용하실 수 있어요~
-#(터미널에 입력하세요) export OPENAI_API_KEY= 키를 여기다 입력
 class RAGASEvaluator:
     def __init__(self):
         openai.api_key = os.getenv("OPENAI_API_KEY")
